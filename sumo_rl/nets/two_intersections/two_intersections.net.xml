@@ -4,7 +4,7 @@
 <configuration xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="http://sumo.dlr.de/xsd/neteditConfiguration.xsd">
 
     <input>
-        <sumocfg-file value="/home/lvyx/Documents/sumo-rl-main/sumo_rl/nets/two_inter.sumocfg"/>
+        <sumocfg-file value="/home/lvyx/Documents/sumo-rl-main/sumo_rl/nets/two_intersections.sumocfg"/>
         <sumo-net-file value="/home/lvyx/Documents/sumo-rl-main/sumo_rl/nets/two_intersections.net.xml"/>
     </input>
 

@@ -23,7 +23,7 @@ from pettingzoo.utils.conversions import parallel_wrapper_fn
 from .observations import DefaultObservationFunction, ObservationFunction
 from .traffic_signal import TrafficSignal
 from .vehicle_controller import VehicleController
-
+from gymnasium import spaces
 
 LIBSUMO = "LIBSUMO_AS_TRACI" in os.environ
 
@@ -105,6 +105,7 @@ class SumoEnvironment(gym.Env,VehicleController):
         sumo_warnings: bool = True,
         additional_sumo_cmd: Optional[str] = None,
         render_mode: Optional[str] = None,
+        tripinfo_file: str = "tripinfo.xml"
     ) -> None:
         """Initialize the environment."""
         assert render_mode is None or render_mode in self.metadata["render_modes"], "Invalid render mode."
@@ -115,6 +116,7 @@ class SumoEnvironment(gym.Env,VehicleController):
         self._net = net_file
         self._route = route_file
         self.use_gui = use_gui
+        self.tripinfo_file = tripinfo_file 
         if self.use_gui or self.render_mode is not None:
             self._sumo_binary = sumolib.checkBinary("sumo-gui")
         else:
@@ -153,8 +155,11 @@ class SumoEnvironment(gym.Env,VehicleController):
         self.ts_ids = list(conn.trafficlight.getIDList())
         self.vehicle_ids=traci.vehicle.getIDList()
         self.observation_class = observation_class  
-        self.smart_vehicle=None
-        self.known_smart_vehicle_id=None
+        self.smart_vehicle={}
+        self.known_smart_vehicle_id=[]
+        self.agent_ids=self.ts_ids+self.known_smart_vehicle_id
+        self.vehicle_observation_space=spaces.Box(low=0,high=1,shape=(4,),dtype=np.float32)
+        self.vehicle_action_space=spaces.Discrete(3)
         if isinstance(self.reward_fn, dict):
             self.traffic_signals = {
                 ts: TrafficSignal(
@@ -185,10 +190,17 @@ class SumoEnvironment(gym.Env,VehicleController):
                 )
                 for ts in self.ts_ids
             }
-        if "vehicle1" in self.vehicle_ids:
-            self.known_smart_vehicle_id = 'vehicle1' 
-            self.smart_vehicle = VehicleController(vehicle_id=self.known_smart_vehicle_id, sumo=self.sumo, env=self)
-        
+        for vehicle_id in self.vehicle_ids:
+            if conn.vehicle.getTypeID(vehicle_id)=='type2':
+                self.known_smart_vehicle_id.append(vehicle_id)
+                self.smart_vehicle [vehicle_id]= VehicleController(
+                    self,
+                    vehicle_id,
+                    conn,
+                )
+                    
+                
+            
         
         
 
@@ -204,8 +216,9 @@ class SumoEnvironment(gym.Env,VehicleController):
         self.out_csv_name = out_csv_name
         self.observations = {ts: None for ts in self.ts_ids}
         self.rewards = {ts: None for ts in self.ts_ids}
-        if self.smart_vehicle is not None:
-            self.rewards[self.known_smart_vehicle_id] = 0
+        if self.smart_vehicle:
+            for vehicle_id in self.known_smart_vehicle_id:
+                self.rewards[vehicle_id]=None
 
         self.traffic_light_states={}
 
@@ -222,6 +235,8 @@ class SumoEnvironment(gym.Env,VehicleController):
             str(self.waiting_time_memory),
             "--time-to-teleport",
             str(self.time_to_teleport),
+            "--tripinfo-output", 
+            self.tripinfo_file,
         ]
         if self.begin_time > 0:
             sumo_cmd.append(f"-b {self.begin_time}")
@@ -300,13 +315,21 @@ class SumoEnvironment(gym.Env,VehicleController):
                 )
                 for ts in self.ts_ids
             }
-
+        self.smart_vehicle={}
+        for vehicle_id in self.vehicle_ids:
+            if self.sumo.vehicle.getTypeID(vehicle_id)=='type2':
+                self.known_smart_vehicle_id.append(vehicle_id)
+                self.smart_vehicle [vehicle_id]= VehicleController(
+                    self,
+                    vehicle_id,
+                    conn,
+                    )
         self.vehicles = dict()
         vehicle_ids = self.sumo.vehicle.getIDList()
-        self.vehicles = {vehicle_id: {} for vehicle_id in vehicle_ids}
-        if "vehicle1" in self.vehicle_ids:
-            self.known_smart_vehicle_id = 'vehicle1' 
-            self.smart_vehicle = VehicleController(vehicle_id=self.known_smart_vehicle_id, sumo=self.sumo, env=self)
+        self.vehicles.update ({vehicle_id: {} for vehicle_id in vehicle_ids})
+        
+        
+            
         if self.single_agent:
             return self._compute_observations()[self.ts_ids[0]], self._compute_info()
         else:
@@ -319,6 +342,7 @@ class SumoEnvironment(gym.Env,VehicleController):
 
     def step(self, action: Union[dict, int]):
         # No action, follow fixed TL defined in self.phases
+        
         if self.fixed_ts or action is None or action == {}:
             for _ in range(self.delta_time):
                 self._update_traffic_light()
@@ -326,9 +350,10 @@ class SumoEnvironment(gym.Env,VehicleController):
             # 拆分红绿灯和车辆的动作
             traffic_light_action = {k: v for k, v in action.items() if k in self.ts_ids}
             self._apply_actions(traffic_light_action)
-            if self.smart_vehicle is not None:
-                vehicle_action = action.get(self.known_smart_vehicle_id)
-                self.smart_vehicle.set_next_action(vehicle_action)
+            vehicle_actions={k: v for k, v in action.items() if k in self.known_smart_vehicle_id}
+            for vehicle_id,vehicle_action in vehicle_actions.items():
+                if self.smart_vehicle[vehicle_id].vehicle_time_to_act():
+                    self.smart_vehicle[vehicle_id].next_action=vehicle_action
             self._run_steps()
 
         observations = self._compute_observations()
@@ -344,7 +369,7 @@ class SumoEnvironment(gym.Env,VehicleController):
             return observations, rewards, dones, info
 
     
-    
+    '''
     def _get_traffic_light_state(self, tls_id):
         # 获取当前红绿灯的状态
         state = traci.trafficlight.getRedYellowGreenState(tls_id)
@@ -365,15 +390,24 @@ class SumoEnvironment(gym.Env,VehicleController):
             traci.trafficlight.setRedYellowGreenState(tls_id, 'G')  # 设置为绿灯
         else:
             traci.trafficlight.setRedYellowGreenState(tls_id, 'r')  # 设置为红灯
+    '''
 
     def _run_steps(self):
         time_to_act = False
+        vehicle_time_to_act=False
         while not time_to_act:
             self._sumo_step()
             for ts in self.ts_ids:
                 self.traffic_signals[ts].update()
                 if self.traffic_signals[ts].time_to_act:
                     time_to_act = True
+            for vehicle_id,vehicle in self.smart_vehicle.items():
+                vehicle.update()
+                if vehicle.vehicle_time_to_act():
+                    vehicle_time_to_act=True
+        
+        
+            
                 
  
 
@@ -393,7 +427,7 @@ class SumoEnvironment(gym.Env,VehicleController):
                     self.traffic_signals[ts].set_next_phase(action)
                     
     
-        
+    
 
    
         
@@ -421,62 +455,55 @@ class SumoEnvironment(gym.Env,VehicleController):
                 if self.traffic_signals[ts].time_to_act or self.fixed_ts
             }
         )
-        if self.smart_vehicle is not None:
-            self.observations[self.known_smart_vehicle_id] = self.smart_vehicle.get_observation()  # 获取车辆观察值
-        return {
-            ts: self.observations[ts]
-            for ts in self.observations.keys()
-            if ts in self.ts_ids and (self.traffic_signals[ts].time_to_act or self.fixed_ts)
-        }
+        for vehicle_id in self.known_smart_vehicle_id:
+            self.observations[vehicle_id] = self.smart_vehicle[vehicle_id].get_observation()  
+        return self.observations
 
     def _compute_rewards(self):
         self.rewards.update(
             {
                 ts: self.traffic_signals[ts].compute_reward()
                 for ts in self.ts_ids
-                if self.traffic_signals[ts].time_to_act or self.fixed_ts
+                if self.traffic_signals[ts].time_to_act or self.fixed_ts 
             }
         )
-        if self.smart_vehicle is not None:
-            self.rewards[self.known_smart_vehicle_id] = self.smart_vehicle.compute_reward()
-
-        return {
-        agent_id: self.rewards[agent_id]
-        for agent_id in self.rewards.keys()
-        if agent_id in self.ts_ids and (self.traffic_signals[agent_id].time_to_act or self.fixed_ts) or agent_id == self.known_smart_vehicle_id
-    }
+        for vehicle_id in self.known_smart_vehicle_id:
+            self.rewards[vehicle_id]=self.smart_vehicle[vehicle_id].compute_reward()          
+        return self.rewards
 
     @property
     def observation_space(self):
-        """Return the observation space of a traffic signal.
-
-        Only used in case of single-agent environment.
-        """
-        
-        return self.traffic_signals[self.ts_ids[0]].observation_space
-        
+        if self.single_agent:
+            if self.agent_id in self.ts_ids:
+                return self.traffic_signals[self.ts_ids[0]].observation_space
+            elif self.agent_id in self.known_smart_vehicle_id:
+                return self.smart_vehicle[self.known_smart_vehicle_id[0]].observation_space
+        else:
+            return {agent_id: self.observation_spaces(agent_id) for agent_id in self.agent_ids}
 
     @property
     def action_space(self):
-        """Return the action space of a traffic signal.
-
-        Only used in case of single-agent environment.
-        """
-        return self.traffic_signals[self.ts_ids[0]].action_space
-
-    def observation_spaces(self, ts_id: str):
-        """Return the observation space of a traffic signal."""
-        if ts_id in self.ts_ids:
-            return self.traffic_signals[ts_id].observation_space
+        if self.single_agent:
+            if self.agent_id in self.ts_ids:
+                return self.traffic_signals[self.ts_ids[0]].action_space
+            elif self.agent_id in self.known_smart_vehicle_id:
+                return self.smart_vehicle[self.known_smart_vehicle_id[0]].action_space
         else:
-            return self.smart_vehicle_observation_space
+            return {agent_id: self.action_spaces(agent_id) for agent_id in self.agent_ids}
 
-    def action_spaces(self, ts_id: str) -> gym.spaces.Discrete:
-        """Return the action space of a traffic signal."""
-        if ts_id in self.ts_ids:
-            return self.traffic_signals[ts_id].action_space
-        else:
-            return self.smart_vehicle_action_space
+    def observation_spaces(self, agent_id: str):
+        if agent_id in self.ts_ids:
+            return self.traffic_signals[agent_id].observation_space
+        elif agent_id in self.known_smart_vehicle_id:
+            return self.smart_vehicle[agent_id].observation_space
+
+    def action_spaces(self, agent_id: str) -> gym.spaces.Discrete:
+        if agent_id in self.ts_ids:
+            return self.traffic_signals[agent_id].action_space
+        elif agent_id in self.known_smart_vehicle_id:
+            return self.smart_vehicle[agent_id].action_space
+        
+    
 
     def _sumo_step(self):
         self.sumo.simulationStep()
@@ -487,17 +514,13 @@ class SumoEnvironment(gym.Env,VehicleController):
         vehicles = self.sumo.vehicle.getIDList()
         speeds = [self.sumo.vehicle.getSpeed(vehicle) for vehicle in vehicles]
         waiting_times = [self.sumo.vehicle.getWaitingTime(vehicle) for vehicle in vehicles]
-        if self.known_smart_vehicle_id is not None:
-            smart_vehicle_waiting_time = self.sumo.vehicle.getWaitingTime(self.known_smart_vehicle_id) 
-        else: 
-            smart_vehicle_waiting_time=0
+        
         return {
             # In SUMO, a vehicle is considered halting if its speed is below 0.1 m/s
             "system_total_stopped": sum(int(speed < 0.1) for speed in speeds),
             "system_total_waiting_time": sum(waiting_times),
             "system_mean_waiting_time": 0.0 if len(vehicles) == 0 else np.mean(waiting_times),
             "system_mean_speed": 0.0 if len(vehicles) == 0 else np.mean(speeds),
-            "smart_vehicle_waiting_time": smart_vehicle_waiting_time, 
         }
 
     def _get_per_agent_info(self):
@@ -593,7 +616,6 @@ class SumoEnvironmentPZ(AECEnv, EzPickle):
         self.seed()
         self.env = SumoEnvironment(**self._kwargs)
         self.render_mode = self.env.render_mode
-
         self.agents = self.env.ts_ids
         self.possible_agents = self.env.ts_ids
         self._agent_selector = agent_selector(self.agents)

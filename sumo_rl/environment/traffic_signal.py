@@ -61,7 +61,6 @@ class TrafficSignal:
         begin_time: int,
         reward_fn: Union[str, Callable],
         sumo,
-        smart_vehicle_id=None
     ):
         """Initializes a TrafficSignal object.
 
@@ -90,8 +89,6 @@ class TrafficSignal:
         self.last_reward = None
         self.reward_fn = reward_fn
         self.sumo = sumo
-        if "vehicle1" in self.sumo.vehicle.getIDList():
-            self.smart_vehicle_id="vehicle1"
 
         if type(self.reward_fn) is str:
             if self.reward_fn in TrafficSignal.reward_fns.keys():
@@ -112,6 +109,7 @@ class TrafficSignal:
 
         self.observation_space = self.observation_fn.observation_space()
         self.action_space = spaces.Discrete(self.num_green_phases)
+        self.known_smart_vehicle_id=[]
 
     def _build_phases(self):
         phases = self.sumo.trafficlight.getAllProgramLogics(self.id)[0].phases
@@ -152,6 +150,7 @@ class TrafficSignal:
     def time_to_act(self):
         """Returns True if the traffic signal should act in the current step."""
         return self.next_action_time == self.env.sim_step
+
 
     def update(self):
         """Updates the traffic signal state.
@@ -308,8 +307,9 @@ class TrafficSignal:
         stops = sum(1 for veh in self.sumo.vehicle.getIDList() if self.sumo.vehicle.getSpeed(veh) < 0.1)
         travel_time_variation = np.var([self.sumo.vehicle.getSpeed(veh) for veh in self.sumo.vehicle.getIDList()])
         fuel_consumption = sum(self.sumo.vehicle.getFuelConsumption(veh) for veh in self.sumo.vehicle.getIDList())
-
-       
+        type2_waiting_time = sum(self.sumo.vehicle.getWaitingTime(veh) for veh in self.sumo.vehicle.getIDList() if self.sumo.vehicle.getTypeID(veh) == 'type2')
+        type2_time_loss = sum(self.sumo.vehicle.getTimeLoss(veh) for veh in self.sumo.vehicle.getIDList() if self.sumo.vehicle.getTypeID(veh) == 'type2')
+    
         reward =-(total_waiting_time+stops)
         return reward
 

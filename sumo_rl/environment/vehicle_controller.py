@@ -42,17 +42,33 @@ from gymnasium import spaces
 class VehicleController:
     MIN_GAP = 2.5
 
-    def __init__(self, sumo, env,vehicle_id="vehicle1"):
+    def __init__(self, sumo, env,vehicle_id):
         self.vehicle_id=vehicle_id
         self.sumo = sumo
         self.env = env
         self.id = vehicle_id
         self.current_speed = self.sumo.vehicle.getSpeed(self.id)
         self.next_action_time = env.sim_step
-        self.delta_time = 1  # 
+        self.delta_time=1
+        self.num_surrounding_vehicles=5
+        num_traffic_signals=len(self.env.ts_ids)
+        num_observations=4+len(self.env.ts_ids)+self.num_surrounding_vehicles*4+len(self.env.ts_ids)*2
+        self.observation_space=spaces.Box(low=0,high=1,shape=(num_observations,),dtype=np.float32)
+        self.action_space = spaces.Discrete(3)
+        self.next_action=None
         
 
-    def set_next_action(self, action: str):
+    def update(self):
+        self.current_speed=self.sumo.vehicle.getSpeed(self.id)
+        if self.vehicle_time_to_act():
+            self.excute_action() 
+    
+    def execute_action(self):
+        if self.next_action is not None:
+            self.set_next_action(self.next_action)
+            self.next_action=None
+
+    def set_next_action(self, action):
         """
         Sets the next action for the vehicle which could be accelerate, maintain, or decelerate.
 
@@ -61,17 +77,19 @@ class VehicleController:
         """
         if self.env.sim_step < self.next_action_time:
             return  # 未到下一次行为设置时间
-
-        if action == 'accelerate':
+        if action == 1:
             self.accelerate()
-        elif action == 'maintain':
+        elif action == 0:
             self.maintain()
-        elif action == 'decelerate':
+        elif action == -1:
             self.decelerate()
         else:
             raise ValueError(f"Unknown action: {action}")
+        self.next_action_time = self.env.sim_step + self.delta_time       
+        
 
-        self.next_action_time = self.env.sim_step + self.delta_time
+    def vehicle_time_to_act(self):
+        return self.next_action_time <= self.env.sim_step
 
     def accelerate(self):
         """
@@ -96,13 +114,51 @@ class VehicleController:
         self.current_speed = new_speed
     
     def get_observation(self):
-        # 获取车辆的观察值
-        # 根据你的需求返回合适的值，例如速度、位置等
-        observation = {
-            "speed": self.sumo.vehicle.getSpeed(self.id),
-            # 添加其他需要的观测值
-        }
+        position = self.sumo.vehicle.getPosition(self.id)
+        speed = self.sumo.vehicle.getSpeed(self.id)
+        acceleration = self.sumo.vehicle.getAcceleration(self.id)
+        lane = self.sumo.vehicle.getLaneID(self.id)
+        edge = self.sumo.vehicle.getRoadID(self.id)
+        if edge is None or edge == '' or edge[0] == ':':
+            edge = -1
+        else:
+            edge = int(edge) / 6
+        observation = list(position) + [speed, acceleration, lane, edge]
+
+        # 获取红绿灯状态信息
+        for ts_id in self.env.ts_ids:
+            traffic_signal_state = self.sumo.trafficlight.getRedYellowGreenState(ts_id)
+            observation.append(traffic_signal_state)
+
+        # 获取周围车辆信息
+        surrounding_vehicles = self.sumo.vehicle.getNeighbors(self.id, self.num_surrounding_vehicles)
+        headways = [1000] * self.num_surrounding_vehicles
+        tailways = [1000] * self.num_surrounding_vehicles
+        vel_in_front = [0] * self.num_surrounding_vehicles
+        vel_behind = [0] * self.num_surrounding_vehicles
+
+        for i, v in enumerate(surrounding_vehicles):
+            headways[i] = self.sumo.vehicle.getLaneHeadway(self.id, v)
+            tailways[i] = self.sumo.vehicle.getLaneTailway(self.id, v)
+            vel_in_front[i] = self.sumo.vehicle.getSpeed(v)
+            vel_behind[i] = self.sumo.vehicle.getSpeed(v)
+
+        observation += headways + tailways + vel_in_front + vel_behind
+
+        # 获取每条边上的平均速度和密度
+        for edge in self.sumo.edge.getIDList():
+            veh_ids = self.sumo.vehicle.getIDList()
+            if len(veh_ids) > 0:
+                avg_speed = sum(self.sumo.vehicle.getSpeed(veh) for veh in veh_ids) / len(veh_ids)
+                density = len(veh_ids) / self.sumo.edge.getLength(edge)
+                observation += [avg_speed, density]
+            else:
+                observation += [0, 0]
+
+        observation = np.array(observation, dtype=np.float32)
         return observation
+        
+    
         
     def compute_reward(self):
         """
@@ -111,7 +167,12 @@ class VehicleController:
         # 示例奖励函数：根据车辆速度给予奖励，速度越高奖励越高
         speed = self.sumo.vehicle.getSpeed(self.id)
         waiting_time=self.sumo.vehicle.getWaitingTime(self.id)
-        reward = -waiting_time
+        time_loss = self.sumo.vehicle.getTimeLoss(self.id) 
+        type2_waiting_time = sum(self.sumo.vehicle.getWaitingTime(veh) for veh in self.sumo.vehicle.getIDList() if self.sumo.vehicle.getTypeID(veh) == 'type2')
+        type2_time_loss = sum(self.sumo.vehicle.getTimeLoss(veh) for veh in self.sumo.vehicle.getIDList() if self.sumo.vehicle.getTypeID(veh) == 'type2')
+   
+    
+        reward =-time_loss+speed/self.sumo.vehicle.getMaxSpeed(self.id)-waiting_time
         return reward
 
     
