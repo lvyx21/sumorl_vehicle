@@ -146,10 +146,10 @@ class SumoEnvironment(gym.Env,VehicleController):
         self.sumo = None
         
         if LIBSUMO:
-            traci.start([sumolib.checkBinary("sumo"), "-n", self._net])  # Start only to retrieve traffic light information
+            traci.start([sumolib.checkBinary("sumo"), "-n", self._net,"--tripinfo-output",self.tripinfo_file])  # Start only to retrieve traffic light information
             conn = traci
         else:
-            traci.start([sumolib.checkBinary("sumo"), "-n", self._net], label="init_connection" + self.label)
+            traci.start([sumolib.checkBinary("sumo"), "-n", self._net,"--tripinfo-output",self.tripinfo_file], label="init_connection" + self.label)
             conn = traci.getConnection("init_connection" + self.label)
 
         self.ts_ids = list(conn.trafficlight.getIDList())
@@ -193,11 +193,12 @@ class SumoEnvironment(gym.Env,VehicleController):
         for vehicle_id in self.vehicle_ids:
             if conn.vehicle.getTypeID(vehicle_id)=='type2':
                 self.known_smart_vehicle_id.append(vehicle_id)
-                self.smart_vehicle [vehicle_id]= VehicleController(
+                self.smart_vehicle[vehicle_id]= VehicleController(
                     self,
                     vehicle_id,
                     conn,
                 )
+     
                     
                 
             
@@ -322,8 +323,10 @@ class SumoEnvironment(gym.Env,VehicleController):
                 self.smart_vehicle [vehicle_id]= VehicleController(
                     self,
                     vehicle_id,
-                    conn,
+                    self.sumo,
                     )
+
+        print("Known Smart Vehicle IDs:", self.known_smart_vehicle_id) 
         self.vehicles = dict()
         vehicle_ids = self.sumo.vehicle.getIDList()
         self.vehicles.update ({vehicle_id: {} for vehicle_id in vehicle_ids})
@@ -352,10 +355,12 @@ class SumoEnvironment(gym.Env,VehicleController):
             self._apply_actions(traffic_light_action)
             vehicle_actions={k: v for k, v in action.items() if k in self.known_smart_vehicle_id}
             for vehicle_id,vehicle_action in vehicle_actions.items():
-                if self.smart_vehicle[vehicle_id].vehicle_time_to_act():
-                    self.smart_vehicle[vehicle_id].next_action=vehicle_action
+                if vehicle_id in self.known_smart_vehicle_id:
+                    if self.smart_vehicle[vehicle_id].vehicle_time_to_act():
+                        self.smart_vehicle[vehicle_id].set_next_action(vehicle_action)
             self._run_steps()
-
+        self._update_known_smart_vehicles()
+        
         observations = self._compute_observations()
         rewards = self._compute_rewards()
         dones = self._compute_dones()
@@ -367,6 +372,15 @@ class SumoEnvironment(gym.Env,VehicleController):
             return observations[self.ts_ids[0]], rewards[self.ts_ids[0]], terminated, truncated, info
         else:
             return observations, rewards, dones, info
+
+    def _update_known_smart_vehicles(self):
+        """Update the list of known smart vehicles (type2) at each step."""
+        current_vehicle_ids = self.sumo.vehicle.getIDList()
+        for vehicle_id in current_vehicle_ids:
+            if self.sumo.vehicle.getTypeID(vehicle_id) == 'type2' and vehicle_id not in self.known_smart_vehicle_id:
+                self.known_smart_vehicle_id.append(vehicle_id)
+                self.smart_vehicle[vehicle_id] = VehicleController(self.sumo, self, vehicle_id)
+        print("Known Smart Vehicle IDs:", self.known_smart_vehicle_id)
 
     
     '''
@@ -616,8 +630,8 @@ class SumoEnvironmentPZ(AECEnv, EzPickle):
         self.seed()
         self.env = SumoEnvironment(**self._kwargs)
         self.render_mode = self.env.render_mode
-        self.agents = self.env.ts_ids
-        self.possible_agents = self.env.ts_ids
+        self.agents = self.env.ts_ids+self.env.known_smart_vehicle_id
+        self.possible_agents = self.env.ts_ids+self.env.known_smart_vehicle_id
         self._agent_selector = agent_selector(self.agents)
         self.agent_selection = self._agent_selector.reset()
         # spaces
@@ -691,7 +705,10 @@ class SumoEnvironmentPZ(AECEnv, EzPickle):
             )
 
         if not self.env.fixed_ts:
-            self.env._apply_actions({agent: action})
+            if agent in self.env.ts_ids:
+                self.env._apply_actions({agent: action})
+            else:
+                self.env.smart_vehicle[agent].set_next_action(action)
 
         if self._agent_selector.is_last():
             if not self.env.fixed_ts:
