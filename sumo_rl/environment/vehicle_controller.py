@@ -49,7 +49,7 @@ class VehicleController:
         self.id = vehicle_id
         self.current_speed = self.sumo.vehicle.getSpeed(self.id)
         self.next_action_time = env.sim_step
-        self.delta_time=1
+        self.delta_time=5
         self.num_surrounding_vehicles=5
         #num_traffic_signals=len(self.env.ts_ids)
         #num_observations=4+len(self.env.ts_ids)+self.num_surrounding_vehicles*4+len(self.env.ts_ids)*2

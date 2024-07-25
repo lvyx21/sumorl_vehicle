@@ -18,7 +18,7 @@ from ray.rllib.env.wrappers.pettingzoo_env import ParallelPettingZooEnv
 from ray.tune.registry import register_env
 import sumo_rl
 import traci
-from ray.rllib.algorithms.algorithm import Algorithm
+
 # 设置仿真环境变量
 
 # 解析命令行参数
@@ -26,7 +26,7 @@ from ray.rllib.algorithms.algorithm import Algorithm
 #parser.add_argument("checkpoint_dir", help="Directory containing checkpoint files.")
 #args = parser.parse_args()
 
-checkpoint_dir = "/home/lvyx/ray_results/PPO/PPO_two_intersections_de73c_00000_0_2024-07-25_07-02-58/checkpoint_000016/"
+checkpoint_dir = "/home/lvyx/ray_results/PPO/PPO_two_intersections_f80d8_00000_0_2024-07-24_21-31-01/checkpoint_000017/"
 
 # 注册SUMO环境
 env_name = "two_intersections"
@@ -71,7 +71,7 @@ config = (
 PPOagent = PPO(config=config)
 
 # 从checkpoint恢复PPO模型
-PPOagent=Algorithm.from_checkpoint(checkpoint_dir)
+PPOagent.restore(checkpoint_dir)
 
 # 运行仿真并记录运行数据
 env = ParallelPettingZooEnv(
